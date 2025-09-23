@@ -5,7 +5,8 @@ anthropic>=0.45.0
 requests
 tqdm
 pymongo>=4.0.0
-redis>=4.0.0
+upstash-redis
 upstash-vector
 aiohttp
 beautifulsoup4
+pytz

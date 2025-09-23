@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from logic.search import LogicalSearchProcessor
-from logic.search import enrich_candidates, analyze_hyde_data_requirements, process_mutuals, process_avatar_urls_batch
 from logging_config import setup_logger
 
 logger = setup_logger(__name__)
@@ -45,31 +44,28 @@ class SearchProcessor:
             logger.info("Executing search processing...")
             people_data, search_metrics = await self._execute_search(search_params, flags, user_id, query)
 
-            # Execute ranking if we have results
-            ranked_results = []
+            # Prepare candidates for ranking in RankAndReasoning Lambda
+            candidates = []
             if people_data.get('count', 0) > 0:
-                logger.info(f"Ranking {people_data['count']} search results...")
-                ranked_results = await self._execute_ranking(
-                    people_data=people_data,
-                    hyde_output=hyde_output,
-                    flags=flags
-                )
+                logger.info(f"Found {people_data['count']} search results, preparing candidates for ranking...")
+                # Convert people_data to list of candidates
+                candidates = list(people_data.get('people', {}).values())
 
             # Calculate processing time
             processing_time = (datetime.utcnow() - start_time).total_seconds()
 
             # Prepare result
             result = {
-                'ranked_results': ranked_results,
+                'candidates': candidates,
                 'search_metrics': search_metrics,
-                'result_count': len(ranked_results),
+                'result_count': len(candidates),
                 'processing_time': processing_time,
                 'hyde_analysis': hyde_output
             }
 
             # Results will be persisted by the lambda handler
 
-            logger.info(f"Search processing completed: {len(ranked_results)} candidates")
+            logger.info(f"Search processing completed: {len(candidates)} candidates")
             return result
 
         except Exception as e:
@@ -94,9 +90,13 @@ class SearchProcessor:
         return {
             'regionBasedQuery': response.get('regionBasedQuery'),
             'locationDetails': response.get('locationDetails', {}),
+            'organisationBasedQuery': response.get('organisationBasedQuery'),
             'organisationDetails': response.get('organisationDetails', {}),
+            'sectorBasedQuery': response.get('sectorBasedQuery'),
             'sectorDetails': response.get('sectorDetails', {}),
+            'skillBasedQuery': response.get('skillBasedQuery'),
             'skillDetails': response.get('skillDetails', {}),
+            'dbBasedQuery': response.get('dbBasedQuery'),
             'dbQueryDetails': response.get('dbQueryDetails', {})
         }
 
@@ -121,6 +121,21 @@ class SearchProcessor:
                 fallback=flags.get('fallback', False)
             )
 
+            # Transform list to expected dictionary format (matching original implementation)
+            if isinstance(people_data, list):
+                people_dict = {}
+                for person in people_data:
+                    # Use personId as the key (each result has this field)
+                    person_id = person.get("personId")
+                    if person_id:
+                        people_dict[person_id] = person
+
+                # Create the expected format
+                people_data = {
+                    "count": len(people_data),
+                    "people": people_dict
+                }
+
             logger.info(f"Search completed: {people_data.get('count', 0)} results found")
             return people_data, search_metrics
 
@@ -128,32 +143,4 @@ class SearchProcessor:
             logger.error(f"Search processing failed: {str(e)}")
             raise
 
-    async def _execute_ranking(self, people_data: Dict[str, Any], hyde_output: Dict[str, Any], flags: Dict[str, Any]) -> list:
-        """Execute ranking on search results"""
-        try:
-            # Analyze HyDE data requirements for ranking
-            data_requirements = analyze_hyde_data_requirements(hyde_output)
-
-            # Process mutual connections if needed
-            if data_requirements.get('needs_mutuals'):
-                people_data = process_mutuals(people_data)
-
-            # Process avatar URLs if needed
-            if data_requirements.get('needs_avatars'):
-                people_data = await process_avatar_urls_batch(people_data)
-
-            # Execute candidate enrichment (formerly ranking)
-            enriched_results = await enrich_candidates(
-                people_data=people_data,
-                hyde_analysis=hyde_output,
-                reasoning_model=flags.get('reasoning_model', 'groq_llama'),
-                additional_flags=flags
-            )
-
-            logger.info(f"Enrichment completed: {len(enriched_results)} enriched results")
-            return enriched_results
-
-        except Exception as e:
-            logger.error(f"Ranking failed: {str(e)}")
-            raise
 

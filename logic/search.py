@@ -17,7 +17,6 @@ from functools import lru_cache
 from typing import List, Dict
 from asyncio import Semaphore
 import requests
-from logic.cloudflareFunctions import fetchImage as fetch_image, fetchImageBatch as fetch_image_batch
 
 from logic.utils import format_datetime
 from bson.objectid import ObjectId
@@ -52,37 +51,11 @@ def convert_objectids_to_strings(obj):
         return obj
 
 # ------------------------------------------------------------------------------
-# Batch processing for avatar URLs (unchanged)
-# ------------------------------------------------------------------------------
-_avatar_url_batch: List[str] = []
-_avatar_url_results: Dict[str, str] = {}
-_BATCH_SIZE = 50
-
-def process_avatar_urls_batch():
-    global _avatar_url_batch, _avatar_url_results
-    if not _avatar_url_batch:
-        return
-    results = fetch_image_batch(_avatar_url_batch)
-    _avatar_url_results.update(results)
-    _avatar_url_batch.clear()
-
-def get_avatar_url(raw_url: str) -> str:
-    if not raw_url:
-        return ""
-    if raw_url.startswith(("http://media.licdn.com", "https://media.licdn.com")):
-        return raw_url
-    if raw_url in _avatar_url_results:
-        return _avatar_url_results[raw_url]
-    _avatar_url_batch.append(raw_url)
-    if len(_avatar_url_batch) >= _BATCH_SIZE:
-        process_avatar_urls_batch()
-        return _avatar_url_results.get(raw_url, raw_url)
-    return raw_url
 
 def process_mutuals(mutual_ids):
     """
     Process mutual connections by fetching their details from MongoDB.
-    Returns a list of objects containing personId, name, and avatarURL.
+    Returns a list of objects containing personId and name.
     mutual_ids can be either a list of ObjectIds or a list of dicts with $oid
     """
     if not mutual_ids:
@@ -105,21 +78,14 @@ def process_mutuals(mutual_ids):
         # Query MongoDB directly with ObjectIds
         mutuals = list(mongoCollectionNodes.find(
             {"_id": {"$in": object_ids}},
-            {"_id": 1, "name": 1, "avatarURL": 1}
+            {"_id": 1, "name": 1}
         ))
         if len(mutuals) < len(object_ids):
             logger.warning(f"Some mutual IDs were not found in MongoDB. Found {len(mutuals)} out of {len(object_ids)}")
         
-        # Collect all avatar URLs for batch processing
-        avatar_urls = [mutual.get("avatarURL", "") for mutual in mutuals if mutual.get("avatarURL")]
-        if avatar_urls:
-            global _avatar_url_batch
-            _avatar_url_batch.extend(avatar_urls)
-            process_avatar_urls_batch()
         return [{
             "personId": str(mutual["_id"]),
-            "name": mutual.get("name", ""),
-            "avatarURL": _avatar_url_results.get(mutual.get("avatarURL", ""), mutual.get("avatarURL", ""))
+            "name": mutual.get("name", "")
         } for mutual in mutuals]
     except Exception as e:
         logger.error(f"Error processing mutuals: {str(e)}")
@@ -352,7 +318,6 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
             "linkedinUsername": 1,
             "linkedinHeadline": 1,
             "contacts": 1,
-            "avatarURL": 1,
             "mutual": 1,
             "stage": 1,  # Include stage for response
             "education": 1,  # Always include for jsonToXml
@@ -370,11 +335,6 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
         )
         mongo_docs = {str(doc["_id"]): doc for doc in docs}
         logger.info(f"###LOGS: Fetched {len(mongo_docs)} documents from MongoDB")
-        avatar_urls = [doc.get("avatarURL", "") for doc in mongo_docs.values() if doc.get("avatarURL")]
-        if avatar_urls:
-            global _avatar_url_batch
-            _avatar_url_batch.extend(avatar_urls)
-            process_avatar_urls_batch()
         missing_ids = set(people_data["people"].keys()) - set(mongo_docs.keys())
         if missing_ids:
             logger.warning(f"###LOGS: Missing documents for IDs: {missing_ids}")
@@ -397,7 +357,6 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
                 "name": mongo_doc["name"],
                 "aboutMe": mongo_doc.get("about", ""),
                 "currentLocation": mongo_doc.get("currentLocation", ""),
-                "avatarURL": _avatar_url_results.get(mongo_doc.get("avatarURL", ""), mongo_doc.get("avatarURL", "")),
                 "mutuals": process_mutuals(mongo_doc.get("mutual", []) or mongo_doc.get("contacts", {}).get("mutuals", []))
             }
             
@@ -458,16 +417,6 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
     # ================================================================
     def enhance_results(base_results):
         enhanced = []
-        avatar_urls = []
-        for person in base_results:
-            pid = person["personId"]
-            doc = mongo_docs.get(pid)
-            if doc and doc.get("avatarURL"):
-                avatar_urls.append(doc["avatarURL"])
-        if avatar_urls:
-            global _avatar_url_batch
-            _avatar_url_batch.extend(avatar_urls)
-            process_avatar_urls_batch()
         for person in base_results:
             pid = person["personId"]
             doc = mongo_docs.get(pid)
@@ -500,7 +449,6 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
                     "linkedinHeadline": doc.get("linkedinHeadline", ""),
                     "contacts": doc.get("contacts", {}),
                     "currentWork": current_work,
-                    "avatarURL": _avatar_url_results.get(doc.get("avatarURL", ""), doc.get("avatarURL", "")),
                     "mutuals": process_mutuals(doc.get("mutual", []) or doc.get("contacts", {}).get("mutuals", []))
                 }
                 # Convert ObjectIds to strings for JSON serialization

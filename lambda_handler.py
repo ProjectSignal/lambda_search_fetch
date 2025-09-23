@@ -117,7 +117,7 @@ async def _run(event):
         now = datetime.utcnow()
 
         # Store full candidate data for ranking in Reasoning Lambda
-        candidates = result.get("ranked_results", [])  # These are now full candidates, not ranked
+        candidates = result.get("candidates", [])  # Raw search candidates for ranking
 
         # Limit candidates to avoid document bloat
         if len(candidates) > 200:
