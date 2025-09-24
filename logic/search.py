@@ -2823,37 +2823,30 @@ class LogicalSearchProcessor:
                         if key not in result and key not in ["similarity", "distance"]:
                             result[key] = org_results[pid][key]
                         
-                    # Mark that this person matched both sector and org
-                    result["matchedBoth"] = True
                     merged[pid] = result
             else:
                 # For OR logic, handle each case
                 if pid in sector_results and pid in org_results:
                     # Person appears in both - merge the data
                     result = sector_results[pid].copy()
-                    
+
                     # Preserve the better similarity score
                     if "similarity" in org_results[pid]:
                         result["similarity"] = max(
                             result.get("similarity", 0),
                             org_results[pid].get("similarity", 0)
                         )
-                    
+
                     # Combine any additional fields from org_results
                     for key in org_results[pid]:
                         if key not in result and key not in ["similarity", "distance"]:
                             result[key] = org_results[pid][key]
-                        
-                    # Mark that this person matched both sector and org
-                    result["matchedBoth"] = True
-                    
+
                 elif pid in sector_results:
                     result = sector_results[pid].copy()
-                    result["matchedSectorOnly"] = True
                 else:
                     result = org_results[pid].copy()
-                    result["matchedOrgOnly"] = True
-                
+
                 merged[pid] = result
         
         logger.info(

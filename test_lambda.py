@@ -23,7 +23,7 @@ def create_test_search_document_with_hyde():
         
         search_id = str(uuid.uuid4())
         user_id = "6797bf304791caa516f6da9e"  # Valid ObjectId for testing
-        query = "Find machine learning experts with Python experience in San Francisco"
+        query = "Find machine learning experts based out of blr and graduated from iit"
         
         now = datetime.utcnow()
         test_doc = {
