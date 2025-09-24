@@ -28,30 +28,13 @@ from db import nodes_collection, webpageCollection
 from threading import BoundedSemaphore
 from logic.search_config import SearchLimits
 
+# Import shared utilities
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from shared_utils import normalize_text, validate_cached_embeddings, safe_json_loads
+
 # Initialize search limits configuration
 search_limits = SearchLimits()
 mongoCollectionNodes = nodes_collection
-
-
-# ------------------------------------------------------------------------------
-# Text normalization utility (matches Hyde's normalization for Redis keys)
-# ------------------------------------------------------------------------------
-def normalize_text(text: str) -> str:
-    """
-    Convert text to a normalized form to ensure consistent Redis keys.
-    - Converts to lowercase
-    - Removes special characters (except spaces)
-    - Replaces multiple spaces with single space
-    - Removes leading/trailing whitespace
-    """
-    if not text:
-        return ""
-    text = text.strip().lower()
-    # Replace special characters (including :) with spaces
-    text = re.sub(r'[^a-z0-9\s]', ' ', text)
-    # Replace multiple spaces with single space
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
 
 # ------------------------------------------------------------------------------
 # Utility function for ObjectId conversion
@@ -182,16 +165,14 @@ def batch_embed_skills(skills: list, alternative_skills: bool):
                 try:
                     cached_data = redis_client.get(cache_key)
                     if cached_data:
-                        if isinstance(cached_data, bytes):
-                            cached_obj = json.loads(cached_data.decode("utf-8"))
-                        else:
-                            cached_obj = json.loads(cached_data)
-
-                        if "embeddings" in cached_obj and cached_obj["embeddings"]:
+                        cached_obj = safe_json_loads(cached_data)
+                        if cached_obj and validate_cached_embeddings(cached_obj):
                             skl["embeddings"] = cached_obj["embeddings"]
                             redis_cache_hits += 1
                             logger.debug(f"Redis cache HIT for skill: {skl.get('name', cache_key)}")
                             continue
+                        else:
+                            logger.debug(f"Invalid cached embeddings for {cache_key}")
                 except Exception as e:
                     logger.warning(f"Redis retrieval failed for {cache_key}: {e}")
 
@@ -214,16 +195,14 @@ def batch_embed_skills(skills: list, alternative_skills: bool):
                                 try:
                                     cached_data = redis_client.get(cache_key)
                                     if cached_data:
-                                        if isinstance(cached_data, bytes):
-                                            cached_obj = json.loads(cached_data.decode("utf-8"))
-                                        else:
-                                            cached_obj = json.loads(cached_data)
-
-                                        if "embeddings" in cached_obj and cached_obj["embeddings"]:
+                                        cached_obj = safe_json_loads(cached_data)
+                                        if cached_obj and validate_cached_embeddings(cached_obj):
                                             rr["embeddings"] = cached_obj["embeddings"]
                                             redis_cache_hits += 1
                                             logger.debug(f"Redis cache HIT for related role: {rr.get('name', cache_key)}")
                                             continue
+                                        else:
+                                            logger.debug(f"Invalid cached embeddings for related role {cache_key}")
                                 except Exception as e:
                                     logger.warning(f"Redis retrieval failed for related role {cache_key}: {e}")
 
@@ -270,10 +249,7 @@ def batch_embed_skills(skills: list, alternative_skills: bool):
                     # Get existing cached data to preserve description
                     existing_data = redis_client.get(cache_key)
                     if existing_data:
-                        if isinstance(existing_data, bytes):
-                            cached_obj = json.loads(existing_data.decode("utf-8"))
-                        else:
-                            cached_obj = json.loads(existing_data)
+                        cached_obj = safe_json_loads(existing_data, {})
                         cached_obj["embeddings"] = emb
                         redis_client.set(cache_key, json.dumps(cached_obj))
                         logger.debug(f"Cached embeddings back to Redis: {cache_key}")
@@ -290,10 +266,7 @@ def batch_embed_skills(skills: list, alternative_skills: bool):
                     try:
                         existing_data = redis_client.get(cache_key)
                         if existing_data:
-                            if isinstance(existing_data, bytes):
-                                cached_obj = json.loads(existing_data.decode("utf-8"))
-                            else:
-                                cached_obj = json.loads(existing_data)
+                            cached_obj = safe_json_loads(existing_data, {})
                             cached_obj["embeddings"] = emb
                             redis_client.set(cache_key, json.dumps(cached_obj))
                             logger.debug(f"Cached related role embeddings back to Redis: {cache_key}")
