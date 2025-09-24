@@ -434,41 +434,22 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
             logger.warning(f"###LOGS: Person {person_id} not marked as scrapped")
             continue
         try:
+            # OPTIMIZED: Only include essential identifiers and process metadata
+            # Profile data will be fetched on-demand by ranking.py's build_candidate_materials()
             transformed_person = {
                 "personId": person_id,
                 "userId": person_data["userId"],
-                "name": mongo_doc["name"],
-                "aboutMe": mongo_doc.get("about", ""),
-                "currentLocation": mongo_doc.get("currentLocation", ""),
-                "mutuals": process_mutuals(mongo_doc.get("mutual", []) or mongo_doc.get("contacts", {}).get("mutuals", []))
+                "similarity": person_data.get("similarity", 1.0),
+                # Include process metadata that ranking stage needs for validation
+                "skillName": person_data.get("skillName", []),
+                "skillDescription": person_data.get("skillDescription", []),
+                "locationDescription": person_data.get("locationDescription", ""),
+                "distance": person_data.get("distance", 0),
+                "vectorMatch": person_data.get("vectorMatch", False),
+                "regexMatch": person_data.get("regexMatch", False)
             }
-            
-            # Add all structured data for rich XML conversion (always include these for jsonToXml)
-            transformed_person["linkedinHeadline"] = mongo_doc.get("linkedinHeadline", "")
-            transformed_person["education"] = mongo_doc.get("education", [])
-            transformed_person["accomplishments"] = mongo_doc.get("accomplishments", {})
-            transformed_person["volunteering"] = mongo_doc.get("volunteering", [])
-            transformed_person["workExperience"] = mongo_doc.get("workExperience", [])
-            
-            # Note: Database query context is now passed at hyde analysis level, not per person
-            work_exp = mongo_doc.get("workExperience", [])
-            if work_exp:
-                first_exp = work_exp[0]
-                transformed_person["currentWork"] = {
-                    "companyName": first_exp.get("companyName", ""),
-                    "duration": first_exp.get("duration", ""),
-                    "description": first_exp.get("description", ""),
-                    "location": first_exp.get("location", ""),
-                    "title": first_exp.get("title", "")
-                }
-            else:
-                transformed_person["currentWork"] = {
-                    "companyName": "",
-                    "duration": "",
-                    "description": "",
-                    "location": "",
-                    "title": ""
-                }
+            # NOTE: Profile data (name, linkedinHeadline, workExperience, etc.) removed
+            # This will be fetched on-demand by ranking.py when needed for XML conversion
             reasoning_transform_people.append(transformed_person)
         except Exception as e:
             logger.error(f"###LOGS: Error processing person {person_id}: {str(e)}")
@@ -498,45 +479,106 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
     #     json.dump(transformed_debug_data, f, indent=2, default=str)
     # logger.info(f"###DEBUG: Saved transformed people data to {debug_folder}/transformed_people_{debug_timestamp}.json")
     # ================================================================
+    def extract_organizations(person):
+        """Extract organizations from search process metadata"""
+        organizations = set()
+
+        # From skill descriptions that mention companies
+        skill_descs = person.get("skillDescription", [])
+        if isinstance(skill_descs, str):
+            skill_descs = [skill_descs]
+
+        for desc in skill_descs:
+            if "at " in desc.lower():
+                # Extract company name after "at"
+                parts = desc.lower().split("at ")
+                if len(parts) > 1:
+                    company = parts[1].split(',')[0].split('.')[0].strip()
+                    if company:
+                        organizations.add(company.title())
+
+        return list(organizations)
+
+    def extract_sectors(person):
+        """Extract sectors from search process metadata"""
+        sectors = set()
+
+        # Basic sector mapping based on skills and context
+        skill_names = person.get("skillName", [])
+        if isinstance(skill_names, str):
+            skill_names = [skill_names]
+
+        sector_mappings = {
+            "fintech": ["payment", "banking", "finance", "trading", "crypto"],
+            "healthcare": ["medical", "health", "pharma", "biotech"],
+            "tech": ["software", "engineering", "developer", "ai", "ml"],
+            "consulting": ["consultant", "advisory", "strategy"]
+        }
+
+        for skill in skill_names:
+            skill_lower = skill.lower()
+            for sector, keywords in sector_mappings.items():
+                if any(keyword in skill_lower for keyword in keywords):
+                    sectors.add(sector.title())
+
+        return list(sectors)
+
+    def extract_locations(person):
+        """Extract locations from search process metadata"""
+        locations = set()
+
+        # From location descriptions if available
+        location_desc = person.get("locationDescription", "")
+        if location_desc:
+            locations.add(location_desc)
+
+        return list(locations)
+
+    def build_match_signals(person):
+        """Build signals metadata about how person was matched"""
+        signals = {
+            "distance": person.get("distance", 0),
+            "matchedBy": []
+        }
+
+        # Detect match types based on available flags
+        if person.get("vectorMatch"):
+            signals["matchedBy"].append("vector")
+        if person.get("regexMatch"):
+            signals["matchedBy"].append("regex")
+        if person.get("skillName"):
+            signals["matchedBy"].append("skill")
+
+        # Default to vector if no specific match type identified
+        if not signals["matchedBy"]:
+            signals["matchedBy"].append("vector")
+
+        return signals
+
     def enhance_results(base_results):
+        """
+        OPTIMIZED: Return only process-generated metadata, remove profile data.
+        Profile data (name, avatar, headline, etc.) should be fetched on-demand.
+        """
         enhanced = []
         for person in base_results:
-            pid = person["personId"]
-            doc = mongo_docs.get(pid)
-            if doc:
-                work_exp = doc.get("workExperience", [])
-                if work_exp:
-                    first_exp = work_exp[0]
-                    current_work = {
-                        "companyName": first_exp.get("companyName", ""),
-                        "duration": first_exp.get("duration", ""),
-                        "description": first_exp.get("description", ""),
-                        "location": first_exp.get("location", ""),
-                        "title": first_exp.get("title", "")
-                    }
-                else:
-                    current_work = {
-                        "companyName": "",
-                        "duration": "",
-                        "description": "",
-                        "location": "",
-                        "title": ""
-                    }
-                enhanced_person = {
-                    **person,
-                    "type": "person",
-                    "stage": doc.get("stage", ""),
-                    "currentLocation": doc.get("currentLocation", ""),
-                    "connectionLevel": doc.get("connectionLevel", ""),
-                    "linkedinUsername": doc.get("linkedinUsername", ""),
-                    "linkedinHeadline": doc.get("linkedinHeadline", ""),
-                    "contacts": doc.get("contacts", {}),
-                    "currentWork": current_work,
-                    "mutuals": process_mutuals(doc.get("mutual", []) or doc.get("contacts", {}).get("mutuals", []))
-                }
-                # Convert ObjectIds to strings for JSON serialization
-                enhanced_person = convert_objectids_to_strings(enhanced_person)
-                enhanced.append(enhanced_person)
+            # KEEP: Process-generated metadata for validation and ranking
+            enhanced_person = {
+                "personId": person["personId"],
+                "userId": person["userId"],
+                "similarity": person.get("similarity", 1.0),
+                "match": {
+                    "skills": person.get("skillName", []),
+                    "organizations": extract_organizations(person),
+                    "sectors": extract_sectors(person),
+                    "locations": extract_locations(person)
+                },
+                "signals": build_match_signals(person)
+            }
+
+            # Convert ObjectIds to strings for JSON serialization
+            enhanced_person = convert_objectids_to_strings(enhanced_person)
+            enhanced.append(enhanced_person)
         return enhanced
     # Ranking removed - now handled in Reasoning Lambda
     # Simply return enhanced candidates for ranking in the next stage
