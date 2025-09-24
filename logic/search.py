@@ -23,7 +23,7 @@ from bson.objectid import ObjectId
 
 from logging_config import setup_logger
 logger = setup_logger(__name__)
-from config import upstash_client
+from config import upstash_client, redis_client
 from db import nodes_collection, webpageCollection
 from threading import BoundedSemaphore
 from logic.search_config import SearchLimits
@@ -32,6 +32,26 @@ from logic.search_config import SearchLimits
 search_limits = SearchLimits()
 mongoCollectionNodes = nodes_collection
 
+
+# ------------------------------------------------------------------------------
+# Text normalization utility (matches Hyde's normalization for Redis keys)
+# ------------------------------------------------------------------------------
+def normalize_text(text: str) -> str:
+    """
+    Convert text to a normalized form to ensure consistent Redis keys.
+    - Converts to lowercase
+    - Removes special characters (except spaces)
+    - Replaces multiple spaces with single space
+    - Removes leading/trailing whitespace
+    """
+    if not text:
+        return ""
+    text = text.strip().lower()
+    # Replace special characters (including :) with spaces
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    # Replace multiple spaces with single space
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 # ------------------------------------------------------------------------------
 # Utility function for ObjectId conversion
@@ -135,60 +155,150 @@ def get_jina_embeddings(texts):
 # ------------------------------------------------------------------------------
 def batch_embed_skills(skills: list, alternative_skills: bool):
     """
-    Collect all skill descriptions (and related role descriptions if alternative_skills=True)
-    that do not already have "embeddings". Make one Jina call, then assign them back.
+    Enhanced skill embedding function that checks Redis cache first before generating embeddings.
+    Leverages cache_key fields passed from Hyde to retrieve cached embeddings efficiently.
     Each skill dict has the form:
         {
           "name": "...",
           "description": "...",
+          "cache_key": "skill:normalized_name",  # NEW: Redis cache key from Hyde
           "embeddings": optional [...],
           "titleKeywords": optional [...],
           "relatedRoles": [
-            {"name":"...", "description":"...", "embeddings": optional [...]} ...
+            {"name":"...", "description":"...", "cache_key": "...", "embeddings": optional [...]} ...
           ]
         }
     """
     texts_to_embed = []
     index_map = []
+    redis_cache_hits = 0
+    redis_cache_misses = 0
+
+    # Step 1: Check Redis cache for all skills
     for skill_idx, skl in enumerate(skills):
-            
         if "embeddings" not in skl or not skl["embeddings"]:
+            cache_key = skl.get("cache_key")
+            if cache_key:
+                try:
+                    cached_data = redis_client.get(cache_key)
+                    if cached_data:
+                        if isinstance(cached_data, bytes):
+                            cached_obj = json.loads(cached_data.decode("utf-8"))
+                        else:
+                            cached_obj = json.loads(cached_data)
+
+                        if "embeddings" in cached_obj and cached_obj["embeddings"]:
+                            skl["embeddings"] = cached_obj["embeddings"]
+                            redis_cache_hits += 1
+                            logger.debug(f"Redis cache HIT for skill: {skl.get('name', cache_key)}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Redis retrieval failed for {cache_key}: {e}")
+
+            # No cache hit, prepare for Jina generation
             desc = skl.get("description", "").strip()
             if desc:
                 texts_to_embed.append(desc)
-                index_map.append((skill_idx, False, None))
-        if alternative_skills and isinstance(skl.get("relatedRoles"), list):
-            for rr_idx, rr in enumerate(skl["relatedRoles"]):
-                # Handle both dict and string related roles
-                if isinstance(rr, dict):
-                    if "embeddings" not in rr or not rr["embeddings"]:
-                        rr_desc = rr.get("description", "").strip()
+                index_map.append((skill_idx, False, None, cache_key))
+                redis_cache_misses += 1
+
+    # Step 2: Check Redis cache for related roles if alternative_skills enabled
+    if alternative_skills:
+        for skill_idx, skl in enumerate(skills):
+            if isinstance(skl.get("relatedRoles"), list):
+                for rr_idx, rr in enumerate(skl["relatedRoles"]):
+                    if isinstance(rr, dict):
+                        if "embeddings" not in rr or not rr["embeddings"]:
+                            cache_key = rr.get("cache_key")
+                            if cache_key:
+                                try:
+                                    cached_data = redis_client.get(cache_key)
+                                    if cached_data:
+                                        if isinstance(cached_data, bytes):
+                                            cached_obj = json.loads(cached_data.decode("utf-8"))
+                                        else:
+                                            cached_obj = json.loads(cached_data)
+
+                                        if "embeddings" in cached_obj and cached_obj["embeddings"]:
+                                            rr["embeddings"] = cached_obj["embeddings"]
+                                            redis_cache_hits += 1
+                                            logger.debug(f"Redis cache HIT for related role: {rr.get('name', cache_key)}")
+                                            continue
+                                except Exception as e:
+                                    logger.warning(f"Redis retrieval failed for related role {cache_key}: {e}")
+
+                            # No cache hit, prepare for Jina generation
+                            rr_desc = rr.get("description", "").strip()
+                            if rr_desc:
+                                texts_to_embed.append(rr_desc)
+                                index_map.append((skill_idx, True, rr_idx, cache_key))
+                                redis_cache_misses += 1
+                    elif isinstance(rr, str):
+                        # String-based related role, treat as description
+                        rr_desc = rr.strip()
                         if rr_desc:
                             texts_to_embed.append(rr_desc)
-                            index_map.append((skill_idx, True, rr_idx))
-                elif isinstance(rr, str):
-                    # If rr is a string, use it as the description
-                    rr_desc = rr.strip()
-                    if rr_desc:
-                        texts_to_embed.append(rr_desc)
-                        index_map.append((skill_idx, True, rr_idx))
+                            index_map.append((skill_idx, True, rr_idx, None))  # No cache key for string roles
+                            redis_cache_misses += 1
+
+    logger.info(f"Redis cache performance - Hits: {redis_cache_hits}, Misses: {redis_cache_misses}")
+
+    # Step 3: Generate embeddings for cache misses
     if not texts_to_embed:
+        logger.info("All embeddings retrieved from Redis cache - no Jina API calls needed")
         return
+
+    logger.info(f"Generating embeddings via Jina API for {len(texts_to_embed)} items")
     new_embeddings = get_jina_embeddings(texts_to_embed)
     if len(new_embeddings) != len(index_map):
         logger.warning(
             f"batch_embed_skills mismatch: got {len(new_embeddings)} embeddings but expected {len(index_map)}"
         )
         return
+
+    # Step 4: Assign embeddings and optionally cache them back to Redis
     for emb_idx, emb in enumerate(new_embeddings):
-        skill_idx, is_related, rr_idx = index_map[emb_idx]
+        skill_idx, is_related, rr_idx, cache_key = index_map[emb_idx]
+
         if not is_related:
+            # Main skill embedding
             skills[skill_idx]["embeddings"] = emb
+
+            # Cache back to Redis if we have a cache key
+            if cache_key:
+                try:
+                    # Get existing cached data to preserve description
+                    existing_data = redis_client.get(cache_key)
+                    if existing_data:
+                        if isinstance(existing_data, bytes):
+                            cached_obj = json.loads(existing_data.decode("utf-8"))
+                        else:
+                            cached_obj = json.loads(existing_data)
+                        cached_obj["embeddings"] = emb
+                        redis_client.set(cache_key, json.dumps(cached_obj))
+                        logger.debug(f"Cached embeddings back to Redis: {cache_key}")
+                except Exception as e:
+                    logger.warning(f"Failed to cache embeddings for {cache_key}: {e}")
         else:
-            # Handle both dict and string related roles
+            # Related role embedding
             rr = skills[skill_idx]["relatedRoles"][rr_idx]
             if isinstance(rr, dict):
                 skills[skill_idx]["relatedRoles"][rr_idx]["embeddings"] = emb
+
+                # Cache back to Redis if we have a cache key
+                if cache_key:
+                    try:
+                        existing_data = redis_client.get(cache_key)
+                        if existing_data:
+                            if isinstance(existing_data, bytes):
+                                cached_obj = json.loads(existing_data.decode("utf-8"))
+                            else:
+                                cached_obj = json.loads(existing_data)
+                            cached_obj["embeddings"] = emb
+                            redis_client.set(cache_key, json.dumps(cached_obj))
+                            logger.debug(f"Cached related role embeddings back to Redis: {cache_key}")
+                    except Exception as e:
+                        logger.warning(f"Failed to cache related role embeddings for {cache_key}: {e}")
             elif isinstance(rr, str):
                 # Convert string to dict with embeddings
                 skills[skill_idx]["relatedRoles"][rr_idx] = {
