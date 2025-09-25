@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 from pytz import utc
+import re
+import json
 
 # --- Constants ---
 VALID_STAGES = ["LOW", "MEDIUM", "STRONG", "VERY_STRONG"]
@@ -119,3 +121,80 @@ def get_start_of_current_week_utc():
     now = datetime.utcnow().replace(tzinfo=utc)
     start = now - timedelta(days=now.weekday())
     return start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def normalize_text(text: str) -> str:
+    """
+    Convert text to a normalized form to ensure consistent Redis keys.
+    Used by both Hyde and Fetch lambdas for consistent key generation.
+
+    - Converts to lowercase
+    - Removes special characters (except spaces)
+    - Replaces multiple spaces with single space
+    - Removes leading/trailing whitespace
+
+    Args:
+        text: The text to normalize
+
+    Returns:
+        Normalized text suitable for Redis keys
+    """
+    if not text:
+        return ""
+    text = text.strip().lower()
+    # Replace special characters (including :) with spaces
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    # Replace multiple spaces with single space
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+def validate_cached_embeddings(cached_obj: dict) -> bool:
+    """
+    Validate that cached data contains valid embeddings.
+
+    Args:
+        cached_obj: Dictionary loaded from Redis cache
+
+    Returns:
+        True if embeddings are valid, False otherwise
+    """
+    if not isinstance(cached_obj, dict):
+        return False
+
+    embeddings = cached_obj.get("embeddings")
+    if not embeddings:
+        return False
+
+    # Check if embeddings is a list of numbers with expected dimension
+    if not isinstance(embeddings, list):
+        return False
+
+    if len(embeddings) != 1024:
+        return False
+
+    # Quick validation that all elements are numbers
+    try:
+        return all(isinstance(x, (int, float)) for x in embeddings)
+    except (TypeError, AttributeError):
+        return False
+
+
+def safe_json_loads(data, default=None):
+    """
+    Safely parse JSON data with error handling.
+
+    Args:
+        data: JSON string or bytes to parse
+        default: Default value to return on error
+
+    Returns:
+        Parsed JSON object or default value
+    """
+    try:
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
+
+        return json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, AttributeError):
+        return default

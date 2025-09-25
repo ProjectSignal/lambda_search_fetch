@@ -27,10 +27,7 @@ from config import upstash_client, redis_client
 from db import nodes_collection, webpageCollection
 from threading import BoundedSemaphore
 from logic.search_config import SearchLimits
-
-# Import shared utilities
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from shared_utils import normalize_text, validate_cached_embeddings, safe_json_loads
+from logic.utils import normalize_text, validate_cached_embeddings, safe_json_loads
 
 # Initialize search limits configuration
 search_limits = SearchLimits()
