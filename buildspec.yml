@@ -1,0 +1,90 @@
+version: 0.2
+
+# Environment variables for the build process
+env:
+  variables:
+    LAMBDA_FUNCTION_NAME: "lambda-search-fetch"
+    PYTHON_VERSION: "3.11"
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - echo "Installing AWS CLI and dependencies..."
+      - pip install --upgrade pip
+      - pip install awscli
+
+  pre_build:
+    commands:
+      - echo "Pre-build phase started on `date`"
+      - echo "Logging into AWS..."
+      - aws --version
+      - echo "Checking current directory contents:"
+      - ls -la
+      - echo "Installing Python dependencies..."
+      - pip install -r requirements.txt -t ./
+      - echo "Current working directory after dependency installation:"
+      - ls -la
+
+  build:
+    commands:
+      - echo "Build phase started on `date`"
+      - echo "Creating deployment package..."
+      # Remove unnecessary files and directories to reduce package size
+      - echo "Cleaning up unnecessary files..."
+      - find . -name "*.pyc" -delete
+      - find . -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+      - find . -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
+      - find . -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true
+      - find . -name "test" -type d -exec rm -rf {} + 2>/dev/null || true
+      - rm -rf .git .gitignore README.md buildspec.yml
+
+      # Create deployment package
+      - echo "Creating ZIP deployment package..."
+      - zip -r lambda-deployment-package.zip . -x "buildspec.yml" "README.md" ".git/*" ".gitignore"
+      - echo "Deployment package created. Size:"
+      - ls -lah lambda-deployment-package.zip
+
+  post_build:
+    commands:
+      - echo "Post-build phase started on `date`"
+      - echo "Deploying Lambda function..."
+
+      # Check if Lambda function exists
+      - |
+        if aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME 2>/dev/null; then
+          echo "Lambda function $LAMBDA_FUNCTION_NAME exists. Updating function code..."
+          aws lambda update-function-code \
+            --function-name $LAMBDA_FUNCTION_NAME \
+            --zip-file fileb://lambda-deployment-package.zip
+
+          echo "Waiting for function update to complete..."
+          aws lambda wait function-updated --function-name $LAMBDA_FUNCTION_NAME
+
+          echo "Function code updated successfully!"
+        else
+          echo "Lambda function $LAMBDA_FUNCTION_NAME does not exist."
+          echo "Please create the Lambda function first with the appropriate IAM role, environment variables, and configuration."
+          echo "You can create it through AWS Console, CLI, or CloudFormation/CDK."
+          echo "Required environment variables for the function:"
+          echo "  - API_BASE_URL"
+          echo "  - API_KEY (optional)"
+          echo "Required IAM permissions:"
+          echo "  - CloudWatch Logs permissions"
+          exit 1
+        fi
+
+      # Verify deployment
+      - echo "Verifying deployment..."
+      - aws lambda get-function --function-name $LAMBDA_FUNCTION_NAME --query 'Configuration.LastModified'
+      - echo "Lambda function $LAMBDA_FUNCTION_NAME deployed successfully on `date`"
+
+artifacts:
+  files:
+    - lambda-deployment-package.zip
+  name: lambda-search-fetch-$(date +%Y-%m-%d-%H-%M-%S)
+
+# Optional: Cache dependencies to speed up builds
+cache:
+  paths:
+    - '/root/.cache/pip/**/*'
