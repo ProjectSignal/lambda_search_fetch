@@ -125,10 +125,10 @@ class SearchProcessor:
             if isinstance(people_data, list):
                 people_dict = {}
                 for person in people_data:
-                    # Use personId as the key (each result has this field)
-                    person_id = person.get("personId")
-                    if person_id:
-                        people_dict[person_id] = person
+                    # Use nodeId as the key (each result has this field)
+                    node_id = person.get("nodeId")
+                    if node_id:
+                        people_dict[node_id] = person
 
                 # Create the expected format
                 people_data = {

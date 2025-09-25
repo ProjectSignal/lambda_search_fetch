@@ -55,7 +55,7 @@ def convert_objectids_to_strings(obj):
 def process_mutuals(mutual_ids):
     """
     Process mutual connections by fetching their details from MongoDB.
-    Returns a list of objects containing personId and name.
+    Returns a list of objects containing nodeId and name.
     mutual_ids can be either a list of ObjectIds or a list of dicts with $oid
     """
     if not mutual_ids:
@@ -84,7 +84,7 @@ def process_mutuals(mutual_ids):
             logger.warning(f"Some mutual IDs were not found in MongoDB. Found {len(mutuals)} out of {len(object_ids)}")
         
         return [{
-            "personId": str(mutual["_id"]),
+            "nodeId": str(mutual["_id"]),
             "name": mutual.get("name", "")
         } for mutual in mutuals]
     except Exception as e:
@@ -362,7 +362,7 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
     #     "hyde_result": hyde_result,
     #     "people_data_summary": {
     #         "total_people": len(people_data['people']),
-    #         "person_ids": list(people_data['people'].keys())[:5]  # First 5 IDs for reference
+    #         "node_ids": list(people_data['people'].keys())[:5]  # First 5 IDs for reference
     #     },
     #     "reasoning_model": reasoning_model,
     #     "hyde_analysis_flags": hyde_analysis_flags
@@ -384,7 +384,7 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
         logger.info(f"###LOGS: Found {len(db_queries)} database queries for context")
     
     try:
-        person_ids = [ObjectId(person_id) for person_id in people_data["people"].keys()]
+        node_ids = [ObjectId(node_id) for node_id in people_data["people"].keys()]
         
         # Build projection dynamically based on HyDE requirements
         base_projection = {
@@ -410,7 +410,7 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
             base_projection[field] = 1
             
         docs = mongoCollectionNodes.find(
-            {"_id": {"$in": person_ids}},
+            {"_id": {"$in": node_ids}},
             base_projection
         )
         mongo_docs = {str(doc["_id"]): doc for doc in docs}
@@ -422,19 +422,19 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
         logger.error(f"###LOGS: Error in MongoDB fetch: {str(e)}")
         return []
     reasoning_transform_people = []
-    for person_id, person_data in people_data["people"].items():
-        mongo_doc = mongo_docs.get(person_id)
+    for node_id, person_data in people_data["people"].items():
+        mongo_doc = mongo_docs.get(node_id)
         if not mongo_doc:
-            logger.warning(f"###LOGS: No MongoDB document for person {person_id}")
+            logger.warning(f"###LOGS: No MongoDB document for person {node_id}")
             continue
         if not mongo_doc.get("scrapped"):
-            logger.warning(f"###LOGS: Person {person_id} not marked as scrapped")
+            logger.warning(f"###LOGS: Person {node_id} not marked as scrapped")
             continue
         try:
             # OPTIMIZED: Only include essential identifiers and process metadata
             # Profile data will be fetched on-demand by ranking.py's build_candidate_materials()
             transformed_person = {
-                "personId": person_id,
+                "nodeId": node_id,
                 "userId": person_data["userId"],
                 "similarity": person_data.get("similarity", 1.0),
                 # Include process metadata that ranking stage needs for validation
@@ -449,7 +449,7 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
             # This will be fetched on-demand by ranking.py when needed for XML conversion
             reasoning_transform_people.append(transformed_person)
         except Exception as e:
-            logger.error(f"###LOGS: Error processing person {person_id}: {str(e)}")
+            logger.error(f"###LOGS: Error processing person {node_id}: {str(e)}")
             traceback.print_exc()
             continue
     logger.info(f"###LOGS: Transformed {len(reasoning_transform_people)} people for reasoning")
@@ -561,7 +561,7 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
         for person in base_results:
             # KEEP: Process-generated metadata for validation and ranking
             enhanced_person = {
-                "personId": person["personId"],
+                "nodeId": person["nodeId"],
                 "userId": person["userId"],
                 "similarity": person.get("similarity", 1.0),
                 "match": {
@@ -587,7 +587,7 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
 # ------------------------------------------------------------------------------
 def union_people_dicts(list_of_dicts: list) -> dict:
     """
-    Given multiple dicts of { personId -> {...} }, produce the union.
+    Given multiple dicts of { nodeId -> {...} }, produce the union.
     For each person that appears in multiple dicts:
     - Merge their skill names and descriptions into unique lists
     - Keep the lowest distance score if present
@@ -697,7 +697,7 @@ def getShortListedPeopleForLocationRegex(locationObj: dict,
                 continue
 
             res = {
-                "personId": pid,
+                "nodeId": pid,
                 "userId": str(doc["userId"]),
                 "locationName": loc_name,
                 "locationDescription": doc.get("currentLocation", ""),
@@ -787,17 +787,17 @@ def getShortListedPeopleForSkill(skillObj: dict,
                         
                     metadata = res.metadata
                     data = res.data
-                    person_id = metadata["personId"]
+                    node_id = metadata["personId"]
                     
-                    if shortListedPeople and person_id not in shortListedPeople:
+                    if shortListedPeople and node_id not in shortListedPeople:
                         filtered_count += 1
                         continue
                         
-                    if person_id in vector_results and vector_results[person_id].get("similarity", 0.0) >= similarity:
+                    if node_id in vector_results and vector_results[node_id].get("similarity", 0.0) >= similarity:
                         continue
                         
                     result_dict = {
-                        "personId": person_id,
+                        "nodeId": node_id,
                         "userId": metadata["userId"],
                         "skillName": metadata["skillName"],
                         "skillDescription": data,
@@ -805,12 +805,12 @@ def getShortListedPeopleForSkill(skillObj: dict,
                         "vectorMatch": True
                     }
                     
-                    if shortListedPeople and person_id in shortListedPeople:
+                    if shortListedPeople and node_id in shortListedPeople:
                         for key in ["locationDescription"]:
-                            if key in shortListedPeople[person_id]:
-                                result_dict[key] = shortListedPeople[person_id][key]
+                            if key in shortListedPeople[node_id]:
+                                result_dict[key] = shortListedPeople[node_id][key]
                     
-                    vector_results[person_id] = result_dict
+                    vector_results[node_id] = result_dict
                 
                 logger.info(
                     f"Vector search completed. Similarity filtered: {similarity_filtered}, "
@@ -970,7 +970,7 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
         max_results: Maximum number of results to return
     
     Returns:
-        Dictionary of person_id -> person data
+        Dictionary of node_id -> person data
     """
     try:
         if not titleKeywords:
@@ -1101,12 +1101,12 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
         filtered_count = 0
         
         for doc in docs:
-            person_id = str(doc["_id"])
+            node_id = str(doc["_id"])
             
             # This check is now redundant if we pre-filtered in MongoDB
-            if shortListedPeople and person_id not in shortListedPeople:
+            if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
-                logger.warning(f"Person {person_id} ({doc.get('name')}) found in DB but not in shortlist")
+                logger.warning(f"Person {node_id} ({doc.get('name')}) found in DB but not in shortlist")
                 continue
             
             # Extract current title from workExperience or headline
@@ -1121,7 +1121,7 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
                 logger.debug(f"Matched: {doc.get('name')} with title: {current_title}")
             
             result_dict = {
-                "personId": person_id,
+                "nodeId": node_id,
                 "userId": str(doc["userId"]),
                 "name": doc.get("name", ""),
                 "currentTitle": current_title,
@@ -1136,12 +1136,12 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
                 result_dict["matchedTitles"] = list(set(matched_titles))
             
             # Include existing fields from shortListedPeople if available
-            if shortListedPeople and person_id in shortListedPeople:
+            if shortListedPeople and node_id in shortListedPeople:
                 for key in ["skillDescription", "skillName", "locationDescription"]:
-                    if key in shortListedPeople[person_id]:
-                        result_dict[key] = shortListedPeople[person_id][key]
+                    if key in shortListedPeople[node_id]:
+                        result_dict[key] = shortListedPeople[node_id][key]
             
-            people[person_id] = result_dict
+            people[node_id] = result_dict
         
         total_time = time.time() - start_time
         logger.info(
@@ -1172,7 +1172,7 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
         max_results: Maximum number of results to return
     
     Returns:
-        Dictionary of person_id -> person data
+        Dictionary of node_id -> person data
     """
     try:
         regex_patterns = skillObj.get("regexPatterns", {})
@@ -1254,12 +1254,12 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
         filtered_count = 0
         
         for doc in docs:
-            person_id = str(doc["_id"])
+            node_id = str(doc["_id"])
             
             # This check is now redundant if we pre-filtered in MongoDB, but keep for safety
-            if shortListedPeople and person_id not in shortListedPeople:
+            if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
-                logger.warning(f"Person {person_id} found in DB but not in shortlist (should not happen with optimization)")
+                logger.warning(f"Person {node_id} found in DB but not in shortlist (should not happen with optimization)")
                 continue
             
             # Build context for display without re-validating MongoDB's regex matches
@@ -1290,7 +1290,7 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
                     matched_contexts.append("Headline match")
             
             result_dict = {
-                "personId": person_id,
+                "nodeId": node_id,
                 "userId": str(doc["userId"]),
                 "name": doc.get("name", ""),
                 "skillName": skill_name,
@@ -1300,12 +1300,12 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
             }
             
             # Include existing fields from shortListedPeople if available
-            if shortListedPeople and person_id in shortListedPeople:
+            if shortListedPeople and node_id in shortListedPeople:
                 for key in ["locationDescription"]:
-                    if key in shortListedPeople[person_id]:
-                        result_dict[key] = shortListedPeople[person_id][key]
+                    if key in shortListedPeople[node_id]:
+                        result_dict[key] = shortListedPeople[node_id][key]
             
-            people[person_id] = result_dict
+            people[node_id] = result_dict
         
         total_time = time.time() - start_time
         logger.info(
@@ -1554,15 +1554,15 @@ def getShortListedPeopleForOrganisation(organisationObj: dict,  # ← Changed pa
         filtered_count = 0
         
         for doc in result_org:
-            person_id = str(doc["_id"])
+            node_id = str(doc["_id"])
             # This check is now redundant if we pre-filtered in MongoDB, but keep for safety
-            if shortListedPeople and person_id not in shortListedPeople:
+            if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
-                logger.warning(f"Person {person_id} found in DB but not in shortlist (should not happen with optimization)")
+                logger.warning(f"Person {node_id} found in DB but not in shortlist (should not happen with optimization)")
                 continue
                 
             result_dict = {
-                "personId": person_id,
+                "nodeId": node_id,
                 "userId": str(doc["userId"]),
                 "name": doc["name"],
                 "temporalMatch": temporal  # Add temporal match type
@@ -1606,12 +1606,12 @@ def getShortListedPeopleForOrganisation(organisationObj: dict,  # ← Changed pa
                 if isinstance(value, datetime):
                     result_dict[key] = format_datetime(value)
                     
-            if shortListedPeople and person_id in shortListedPeople:
+            if shortListedPeople and node_id in shortListedPeople:
                 for k in ["locationDescription", "skillDescription", "skillName"]:
-                    if k in shortListedPeople[person_id]:
-                        result_dict[k] = shortListedPeople[person_id][k]
+                    if k in shortListedPeople[node_id]:
+                        result_dict[k] = shortListedPeople[node_id][k]
                         
-            people[person_id] = result_dict
+            people[node_id] = result_dict
             
         sorted_people = dict(sorted(
             people.items(),
@@ -1790,10 +1790,10 @@ def getShortListedPeopleForSector(sectorObj: dict,
         size_filtered_count = 0
         
         for user in users:
-            person_id = str(user["_id"])
+            node_id = str(user["_id"])
             
             # Safety check for shortlisted people
-            if shortListedPeople and person_id not in shortListedPeople:
+            if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
                 continue
             
@@ -1879,7 +1879,7 @@ def getShortListedPeopleForSector(sectorObj: dict,
             
             # Build result
             result_dict = {
-                "personId": person_id,
+                "nodeId": node_id,
                 "userId": str(user["userId"]),
                 "name": user.get("name", ""),
                 "sectorName": sector_name,
@@ -1889,12 +1889,12 @@ def getShortListedPeopleForSector(sectorObj: dict,
             }
             
             # Preserve existing fields from shortListedPeople
-            if shortListedPeople and person_id in shortListedPeople:
+            if shortListedPeople and node_id in shortListedPeople:
                 for key in ["skillDescription", "skillName", "locationDescription"]:
-                    if key in shortListedPeople[person_id]:
-                        result_dict[key] = shortListedPeople[person_id][key]
+                    if key in shortListedPeople[node_id]:
+                        result_dict[key] = shortListedPeople[node_id][key]
             
-            people[person_id] = result_dict
+            people[node_id] = result_dict
         
         # Log statistics
         if has_size_constraint:
@@ -1940,7 +1940,7 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
         max_results: Maximum number of results to return
     
     Returns:
-        Dictionary of person_id -> person data
+        Dictionary of node_id -> person data
     """
     try:
         if not db_queries:
@@ -2129,16 +2129,16 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
         filtered_count = 0
         
         for doc in docs:
-            person_id = str(doc["_id"])
+            node_id = str(doc["_id"])
             
             # This check is now redundant if we pre-filtered in MongoDB, but keep for safety
-            if shortListedPeople and person_id not in shortListedPeople:
+            if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
-                logger.warning(f"Person {person_id} found in DB but not in shortlist (should not happen with optimization)")
+                logger.warning(f"Person {node_id} found in DB but not in shortlist (should not happen with optimization)")
                 continue
             
             result_dict = {
-                "personId": person_id,
+                "nodeId": node_id,
                 "userId": str(doc["userId"]),
                 "name": doc.get("name", ""),
                 "currentLocation": doc.get("currentLocation", ""),
@@ -2146,12 +2146,12 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
             }
             
             # Include existing fields from shortListedPeople if available
-            if shortListedPeople and person_id in shortListedPeople:
+            if shortListedPeople and node_id in shortListedPeople:
                 for key in ["skillDescription", "skillName", "locationDescription"]:
-                    if key in shortListedPeople[person_id]:
-                        result_dict[key] = shortListedPeople[person_id][key]
+                    if key in shortListedPeople[node_id]:
+                        result_dict[key] = shortListedPeople[node_id][key]
             
-            people[person_id] = result_dict
+            people[node_id] = result_dict
         
         logger.info(
             f"Database query search completed. "
