@@ -1,8 +1,6 @@
-"""
-Configuration module for Search Lambda
-"""
+"""Configuration module for the Fetch Lambda."""
+
 import os
-from pymongo import MongoClient
 from upstash_redis import Redis
 from upstash_vector import Index
 from typing import Any, Optional
@@ -24,13 +22,10 @@ def get_env_var(var_name: str, required: bool = True) -> Optional[str]:
     return value
 
 
-# MongoDB Configuration
-MONGODB_URI = get_env_var("MONGO_URI")
-DB_NAME = get_env_var("MONGODB_DB_NAME", required=False) or "finalBackendDB"
-
-# Initialize MongoDB client
-mongo_client = MongoClient(MONGODB_URI)
-mongo_db = mongo_client[DB_NAME]
+# External API configuration (used instead of direct MongoDB connections)
+DATA_API_BASE_URL = get_env_var("SEARCH_API_BASE_URL")
+DATA_API_KEY = get_env_var("SEARCH_API_KEY", required=False) or get_env_var("ADMIN_API_KEY", required=False)
+DATA_API_TIMEOUT = float(get_env_var("SEARCH_API_TIMEOUT", required=False) or 10)
 
 # Upstash Configuration (for vector search and Redis caching)
 UPSTASH_URL = get_env_var("UPSTASH_URL")

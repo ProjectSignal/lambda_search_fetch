@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from search_processor import SearchProcessor
 from logging_config import setup_logger
-from db import searchOutputCollection
+from api_client import (
+    get_search_document,
+    update_search_document,
+    SearchServiceError,
+)
 
 # Load environment variables (for local testing)
 load_dotenv()
@@ -55,7 +59,7 @@ async def _run(event):
         logger.info(f"Processing Search for searchId: {search_id}, user: {user_id}, query: {query}")
 
         # Get search document and verify HyDE analysis is complete
-        search_doc = searchOutputCollection.find_one({"_id": search_id})
+        search_doc = get_search_document(search_id)
         if not search_doc:
             error_msg = f"Search document not found for searchId: {search_id}"
             logger.error(error_msg)
@@ -123,40 +127,40 @@ async def _run(event):
         if len(candidates) > 200:
             candidates = candidates[:200]
 
-        update_result = searchOutputCollection.update_one(
-            {"_id": search_id, "status": {"$in": [SearchStatus.HYDE_COMPLETE, SearchStatus.SEARCH_COMPLETE]}},
-            {
-                "$set": {
+        try:
+            update_search_document(
+                search_id,
+                set_fields={
                     "results": {
                         "summary": {
                             "count": len(candidates),
                             "topK": len(candidates),
                             "idsOnly": False
                         },
-                        "candidates": candidates  # Store full candidates instead of ranked results
+                        "candidates": candidates
                     },
                     "searchMetrics": result.get("search_metrics", {}),
                     "status": SearchStatus.SEARCH_COMPLETE,
-                    "metrics.searchMs": processing_time * 1000,
+                    "metrics": {
+                        **(search_doc.get("metrics", {}) or {}),
+                        "searchMs": processing_time * 1000
+                    },
                     "updatedAt": now
                 },
-                "$addToSet": {
-                    "events": {
+                append_events=[
+                    {
                         "id": f"SEARCH:{search_id}",
                         "stage": "SEARCH",
                         "message": f"Search completed, {len(candidates)} candidates found",
                         "timestamp": now
                     }
-                }
-            }
-        )
-
-        if update_result.matched_count == 0:
-            # Check if document already in SEARCH_COMPLETE status (idempotent retry)
-            existing_doc = searchOutputCollection.find_one({"_id": search_id})
+                ],
+                expected_statuses=[SearchStatus.HYDE_COMPLETE, SearchStatus.SEARCH_COMPLETE],
+            )
+        except SearchServiceError as update_error:
+            existing_doc = get_search_document(search_id)
             if existing_doc and existing_doc.get("status") == SearchStatus.SEARCH_COMPLETE:
                 logger.info(f"Search document {search_id} already processed (idempotent retry)")
-                # Return success since work is already done
                 existing_candidates = existing_doc.get("results", {}).get("candidates", [])
                 return {
                     "statusCode": 200,
@@ -169,16 +173,16 @@ async def _run(event):
                         "note": "Already processed (idempotent)"
                     })
                 }
-            else:
-                error_msg = f"Failed to update search document for searchId: {search_id} - invalid status transition"
-                logger.error(error_msg)
-                return {
-                    "statusCode": 409,  # Conflict status
-                    "body": json.dumps({
-                        "error": error_msg,
-                        "success": False
-                    })
-                }
+
+            error_msg = f"Failed to update search document for searchId: {search_id} - {update_error}"
+            logger.error(error_msg)
+            return {
+                "statusCode": 409,
+                "body": json.dumps({
+                    "error": error_msg,
+                    "success": False
+                })
+            }
 
         logger.info(f"Updated search document {search_id} with {len(candidates)} candidates")
 
@@ -200,29 +204,27 @@ async def _run(event):
         if search_id:
             try:
                 now = datetime.utcnow()
-                searchOutputCollection.update_one(
-                    {"_id": search_id},
-                    {
-                        "$set": {
-                            "status": SearchStatus.ERROR,
-                            "error": {
-                                "stage": "SEARCH",
-                                "message": str(e),
-                                "stackTrace": traceback.format_exc(),
-                                "occurredAt": now
-                            },
-                            "updatedAt": now
+                update_search_document(
+                    search_id,
+                    set_fields={
+                        "status": SearchStatus.ERROR,
+                        "error": {
+                            "stage": "SEARCH",
+                            "message": str(e),
+                            "stackTrace": traceback.format_exc(),
+                            "occurredAt": now
                         },
-                        "$push": {
-                            "events": {
-                                "stage": "SEARCH",
-                                "message": f"Error: {str(e)}",
-                                "timestamp": now
-                            }
+                        "updatedAt": now
+                    },
+                    append_events=[
+                        {
+                            "stage": "SEARCH",
+                            "message": f"Error: {str(e)}",
+                            "timestamp": now
                         }
-                    }
+                    ],
                 )
-            except Exception as db_error:
+            except SearchServiceError as db_error:
                 logger.error(f"Failed to update error state: {db_error}")
         
         return {

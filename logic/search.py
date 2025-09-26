@@ -14,7 +14,7 @@ from datetime import datetime
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from typing import List, Dict
+from typing import List, Dict, Any
 from asyncio import Semaphore
 import requests
 
@@ -24,14 +24,18 @@ from bson.objectid import ObjectId
 from logging_config import setup_logger
 logger = setup_logger(__name__)
 from config import upstash_client, redis_client
-from db import nodes_collection, webpageCollection
+from api_client import (
+    fetch_nodes_by_ids,
+    aggregate_nodes,
+    find_nodes,
+    SearchServiceError,
+)
 from threading import BoundedSemaphore
 from logic.search_config import SearchLimits
 from logic.utils import normalize_text, validate_cached_embeddings, safe_json_loads
 
 # Initialize search limits configuration
 search_limits = SearchLimits()
-mongoCollectionNodes = nodes_collection
 
 # ------------------------------------------------------------------------------
 # Utility function for ObjectId conversion
@@ -50,46 +54,54 @@ def convert_objectids_to_strings(obj):
     else:
         return obj
 
+
+def _build_user_match(userid: str) -> Dict[str, Any]:
+    """Return an Extended JSON ObjectId match filter for the given user id."""
+    if not userid:
+        return {}
+    return {"userId": {"$oid": str(userid)}}
+
 # ------------------------------------------------------------------------------
 
 def process_mutuals(mutual_ids):
     """
-    Process mutual connections by fetching their details from MongoDB.
+    Process mutual connections by fetching their details from the profile data API.
     Returns a list of objects containing nodeId and name.
     mutual_ids can be either a list of ObjectIds or a list of dicts with $oid
     """
     if not mutual_ids:
         return []
+
     try:
-        # If mutual_ids are already ObjectIds, use them directly
-        # Otherwise, convert only if needed
-        object_ids = []
+        node_ids = []
         for mid in mutual_ids:
-            if isinstance(mid, ObjectId):
-                object_ids.append(mid)
-            elif isinstance(mid, dict) and '$oid' in mid:
-                # Convert $oid string to ObjectId only once
-                object_ids.append(ObjectId(mid['$oid']))
+            if isinstance(mid, dict) and '$oid' in mid:
+                node_ids.append(str(mid['$oid']))
+            elif isinstance(mid, ObjectId):
+                node_ids.append(str(mid))
             elif mid:
-                object_ids.append(ObjectId(str(mid)))
-        if not object_ids:
+                node_ids.append(str(mid))
+
+        if not node_ids:
             return []
-            
-        # Query MongoDB directly with ObjectIds
-        mutuals = list(mongoCollectionNodes.find(
-            {"_id": {"$in": object_ids}},
-            {"_id": 1, "name": 1}
-        ))
-        if len(mutuals) < len(object_ids):
-            logger.warning(f"Some mutual IDs were not found in MongoDB. Found {len(mutuals)} out of {len(object_ids)}")
-        
-        return [{
-            "nodeId": str(mutual["_id"]),
-            "name": mutual.get("name", "")
-        } for mutual in mutuals]
-    except Exception as e:
-        logger.error(f"Error processing mutuals: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
+
+        mutual_map = fetch_nodes_by_ids(node_ids, projection={"_id": 1, "name": 1, "avatarURL": 1})
+        results = []
+        for node_id in node_ids:
+            doc = mutual_map.get(node_id)
+            if not doc and node_id.startswith('ObjectId('):
+                doc = mutual_map.get(node_id.strip('ObjectId(').strip(')'))
+            if not doc:
+                continue
+            normalized_id = str(doc.get("_id") or doc.get("nodeId") or node_id)
+            results.append({
+                "nodeId": normalized_id,
+                "name": doc.get("name", ""),
+                "avatarURL": doc.get("avatarURL", "")
+            })
+        return results
+    except SearchServiceError as exc:
+        logger.error("Error processing mutuals via API: %s", exc)
         return []
 
 # ------------------------------------------------------------------------------
@@ -282,12 +294,12 @@ def batch_embed_skills(skills: list, alternative_skills: bool):
 # ------------------------------------------------------------------------------
 def analyze_hyde_data_requirements(hyde_result: dict) -> dict:
     """
-    Analyze HyDE result to determine what additional MongoDB fields to fetch
+    Analyze HyDE result to determine what additional data service fields to fetch
     for proper reasoning/scoring.
     
     Returns:
         dict: {
-            'additional_fields': list of MongoDB fields to fetch,
+            'additional_fields': list of additional fields to request,
             'db_queries': list of database queries for context
         }
     """
@@ -310,7 +322,7 @@ def analyze_hyde_data_requirements(hyde_result: dict) -> dict:
             if field:
                 db_queries.append(query)
                 
-                # Determine which MongoDB collections/fields to fetch
+                # Determine which data service collections/fields to fetch
                 if field.startswith('education.'):
                     required_fields.add('education')
                 elif field.startswith('accomplishments.'):
@@ -384,8 +396,8 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
         logger.info(f"###LOGS: Found {len(db_queries)} database queries for context")
     
     try:
-        node_ids = [ObjectId(node_id) for node_id in people_data["people"].keys()]
-        
+        node_ids = list(people_data["people"].keys())
+
         # Build projection dynamically based on HyDE requirements
         base_projection = {
             "_id": 1,
@@ -399,33 +411,33 @@ async def enrich_candidates(people_data: dict, query: str, newReasoningFlag: boo
             "linkedinHeadline": 1,
             "contacts": 1,
             "mutual": 1,
-            "stage": 1,  # Include stage for response
-            "education": 1,  # Always include for jsonToXml
-            "accomplishments": 1,  # Always include for jsonToXml
-            "volunteering": 1  # Always include for jsonToXml
+            "stage": 1,
+            "education": 1,
+            "accomplishments": 1,
+            "volunteering": 1
         }
-        
-        # Add additional fields based on HyDE analysis
+
         for field in additional_fields:
             base_projection[field] = 1
-            
-        docs = mongoCollectionNodes.find(
-            {"_id": {"$in": node_ids}},
-            base_projection
-        )
-        mongo_docs = {str(doc["_id"]): doc for doc in docs}
-        logger.info(f"###LOGS: Fetched {len(mongo_docs)} documents from MongoDB")
-        missing_ids = set(people_data["people"].keys()) - set(mongo_docs.keys())
+
+        fetched_docs = fetch_nodes_by_ids(node_ids, projection=base_projection)
+        mongo_docs = {}
+        for node_id, doc in fetched_docs.items():
+            normalized_id = str(doc.get("_id") or doc.get("nodeId") or node_id)
+            doc["_id"] = normalized_id
+            mongo_docs[normalized_id] = doc
+        logger.info(f"###LOGS: Fetched {len(mongo_docs)} documents from data API")
+        missing_ids = set(node_ids) - set(mongo_docs.keys())
         if missing_ids:
             logger.warning(f"###LOGS: Missing documents for IDs: {missing_ids}")
-    except Exception as e:
-        logger.error(f"###LOGS: Error in MongoDB fetch: {str(e)}")
+    except SearchServiceError as api_error:
+        logger.error(f"###LOGS: Error fetching candidates via API: {api_error}")
         return []
     reasoning_transform_people = []
     for node_id, person_data in people_data["people"].items():
         mongo_doc = mongo_docs.get(node_id)
         if not mongo_doc:
-            logger.warning(f"###LOGS: No MongoDB document for person {node_id}")
+            logger.warning(f"###LOGS: No data document for person {node_id}")
             continue
         if not mongo_doc.get("scrapped"):
             logger.warning(f"###LOGS: Person {node_id} not marked as scrapped")
@@ -660,14 +672,12 @@ def getShortListedPeopleForLocationRegex(locationObj: dict,
         regex_pattern = rf"(?:{'|'.join(escaped_keywords)})"
 
         # Build base match with user filter
-        base_match = {
-            "userId": ObjectId(userid),
-            "currentLocation": {"$regex": regex_pattern, "$options": "i"}
-        }
-        
+        base_match = _build_user_match(userid)
+        base_match["currentLocation"] = {"$regex": regex_pattern, "$options": "i"}
+
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [ObjectId(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering location search to {len(shortlisted_ids)} shortlisted people")
 
@@ -682,15 +692,15 @@ def getShortListedPeopleForLocationRegex(locationObj: dict,
             {"$limit": max_results}
         ]
 
-        docs = list(mongoCollectionNodes.aggregate(pipeline))
+        docs = aggregate_nodes(pipeline)
         logger.info(
             f"Regex location search for '{loc_name}' (+{len(alt_names)} alt) matched {len(docs)} records")
 
         people = {}
         filtered_count = 0
         for doc in docs:
-            pid = str(doc["_id"])
-            # This check is now redundant if we pre-filtered in MongoDB, but keep for safety
+            pid = str(doc.get("_id") or doc.get("nodeId"))
+            # This check is now redundant if we pre-filtered upstream, but keep for safety
             if shortListedPeople and pid not in shortListedPeople:
                 filtered_count += 1
                 logger.warning(f"Person {pid} found in DB but not in shortlist (should not happen with optimization)")
@@ -698,7 +708,7 @@ def getShortListedPeopleForLocationRegex(locationObj: dict,
 
             res = {
                 "nodeId": pid,
-                "userId": str(doc["userId"]),
+                "userId": str(doc.get("userId")),
                 "locationName": loc_name,
                 "locationDescription": doc.get("currentLocation", ""),
                 "similarity": 1.0,  # fixed score for regex hit
@@ -984,11 +994,10 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
         regex_pattern = build_improved_regex_pattern(titleKeywords)
         
         # If we have a shortlist, optimize by only searching within those IDs
-        match_base = {"userId": ObjectId(userid)}
-        
+        match_base = _build_user_match(userid)
+
         if shortListedPeople:
-            # Convert shortlisted people IDs to ObjectIds for MongoDB query
-            shortlisted_ids = [ObjectId(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
             match_base["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Optimizing search to only look within {len(shortlisted_ids)} shortlisted people")
         
@@ -1085,11 +1094,11 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
         # Add debugging aggregation to understand what's being matched
         if logger.isEnabledFor(logging.DEBUG):
             debug_pipeline = pipeline[:-1] + [{"$count": "total"}]
-            count_result = list(mongoCollectionNodes.aggregate(debug_pipeline))
+            count_result = aggregate_nodes(debug_pipeline)
             total_matches = count_result[0]["total"] if count_result else 0
             logger.debug(f"Total documents matching regex before limit: {total_matches}")
-        
-        docs = list(mongoCollectionNodes.aggregate(pipeline))
+
+        docs = aggregate_nodes(pipeline)
         logger.info(f"Title keyword search matched {len(docs)} records for temporal={temporal}")
         
         # Additional debugging: log a few examples of what was found
@@ -1101,9 +1110,9 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
         filtered_count = 0
         
         for doc in docs:
-            node_id = str(doc["_id"])
+            node_id = str(doc.get("_id") or doc.get("nodeId"))
             
-            # This check is now redundant if we pre-filtered in MongoDB
+            # This check is now redundant if we pre-filtered upstream
             if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
                 logger.warning(f"Person {node_id} ({doc.get('name')}) found in DB but not in shortlist")
@@ -1191,11 +1200,11 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
         regex_pattern = build_improved_regex_pattern(keywords)
         
         # Build base match with user filter
-        base_match = {"userId": ObjectId(userid)}
+        base_match = _build_user_match(userid)
         
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [ObjectId(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering skill regex search to {len(shortlisted_ids)} shortlisted people")
         
@@ -1247,23 +1256,23 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
             {"$limit": max_results}
         ]
         
-        docs = list(mongoCollectionNodes.aggregate(pipeline))
+        docs = aggregate_nodes(pipeline)
         logger.info(f"Skill regex search matched {len(docs)} records")
         
         people = {}
         filtered_count = 0
         
         for doc in docs:
-            node_id = str(doc["_id"])
+            node_id = str(doc.get("_id") or doc.get("nodeId"))
             
-            # This check is now redundant if we pre-filtered in MongoDB, but keep for safety
+            # This check is now redundant if we pre-filtered upstream, but keep for safety
             if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
                 logger.warning(f"Person {node_id} found in DB but not in shortlist (should not happen with optimization)")
                 continue
             
-            # Build context for display without re-validating MongoDB's regex matches
-            # MongoDB already found this person, so we trust its results and just build context
+            # Build context for display without re-validating the data service's regex matches
+            # The data service already found this person, so we trust its results and just build context
             matched_contexts = []
             
             # Build context from available work experience
@@ -1291,7 +1300,7 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
             
             result_dict = {
                 "nodeId": node_id,
-                "userId": str(doc["userId"]),
+                "userId": str(doc.get("userId")),
                 "name": doc.get("name", ""),
                 "skillName": skill_name,
                 "skillDescription": f"Regex match: {', '.join(matched_contexts[:3])}",  # Include context
@@ -1457,11 +1466,11 @@ def getShortListedPeopleForOrganisation(organisationObj: dict,  # ← Changed pa
         regex_pattern = build_improved_regex_pattern(organisationKeywords)
         
         # Build base match with user filter
-        base_match = {"userId": ObjectId(userid)}
+        base_match = _build_user_match(userid)
         
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [ObjectId(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering organization search to {len(shortlisted_ids)} shortlisted people")
 
@@ -1547,15 +1556,15 @@ def getShortListedPeopleForOrganisation(organisationObj: dict,  # ← Changed pa
                 {"$limit": MAX_RESULTS}
             ]
         
-        result_org = list(mongoCollectionNodes.aggregate(pipeline))
+        result_org = aggregate_nodes(pipeline)
         logger.info(f"Found {len(result_org)} matches for temporal={temporal}")
         
         people = {}
         filtered_count = 0
         
         for doc in result_org:
-            node_id = str(doc["_id"])
-            # This check is now redundant if we pre-filtered in MongoDB, but keep for safety
+            node_id = str(doc.get("_id") or doc.get("nodeId"))
+            # This check is now redundant if we pre-filtered upstream, but keep for safety
             if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
                 logger.warning(f"Person {node_id} found in DB but not in shortlist (should not happen with optimization)")
@@ -1563,7 +1572,7 @@ def getShortListedPeopleForOrganisation(organisationObj: dict,  # ← Changed pa
                 
             result_dict = {
                 "nodeId": node_id,
-                "userId": str(doc["userId"]),
+                "userId": str(doc.get("userId")),
                 "name": doc["name"],
                 "temporalMatch": temporal  # Add temporal match type
             }
@@ -1573,12 +1582,12 @@ def getShortListedPeopleForOrganisation(organisationObj: dict,  # ← Changed pa
                 matched_orgs = [exp.get("companyName", "") for exp in doc["matchedWorkExperience"]]
                 result_dict["matchedOrganizations"] = list(set(matched_orgs))
             elif temporal in ["current", "past"] and "workExperience" in doc:
-                # MongoDB already found this person with matching organizations
+                # The data service already found this person with matching organizations
                 # Build context from work experience without re-validating the regex
                 matched_orgs = []
                 work_experiences = doc.get("workExperience", [])
                 
-                # Apply only temporal filtering since MongoDB already did organization matching
+                # Apply only temporal filtering since the data service already did organization matching
                 for idx, exp in enumerate(work_experiences):
                     company_name = exp.get("companyName", "")
                     if not company_name:
@@ -1728,11 +1737,11 @@ def getShortListedPeopleForSector(sectorObj: dict,
         start_time = time.time()
         
         # Build base match with user filter
-        base_match = {"userId": ObjectId(userid)}
+        base_match = _build_user_match(userid)
         
         # OPTIMIZATION: Pre-filter if shortListedPeople provided
         if shortListedPeople:
-            shortlisted_ids = [ObjectId(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering to {len(shortlisted_ids)} shortlisted people")
         
@@ -1765,7 +1774,7 @@ def getShortListedPeopleForSector(sectorObj: dict,
             logger.warning(f"No valid conditions for sector: {sector_name}")
             return {}
         
-        # MongoDB aggregation pipeline
+        # Data service aggregation pipeline
         pipeline = [
             {"$match": base_match},
             {
@@ -1781,8 +1790,8 @@ def getShortListedPeopleForSector(sectorObj: dict,
         ]
         
         # Execute query
-        users = list(nodes_collection.aggregate(pipeline))
-        logger.info(f"MongoDB returned {len(users)} matches for sector '{sector_name}'")
+        users = aggregate_nodes(pipeline)
+        logger.info(f"Data service returned {len(users)} matches for sector '{sector_name}'")
         
         # Process results with Python-based size filtering
         people = {}
@@ -1824,7 +1833,7 @@ def getShortListedPeopleForSector(sectorObj: dict,
                 
                 # Check keyword match
                 if has_keywords:
-                    # Check if any keyword field has content (already matched by MongoDB)
+                    # Check if any keyword field has content (already matched by the data service)
                     if any([exp.get("industry"), exp.get("about"), exp.get("specialties")]):
                         matched_by_keyword = True
                         exp_matches = True
@@ -1867,7 +1876,7 @@ def getShortListedPeopleForSector(sectorObj: dict,
                     size_filtered_count += 1
                     continue
             
-            # Fallback if no matches but user was returned by MongoDB
+            # Fallback if no matches but user was returned by the data service
             if not matching_companies and work_experiences:
                 first_exp = work_experiences[0]
                 company_name = first_exp.get("companyName", "Unknown Company")
@@ -1910,7 +1919,7 @@ def getShortListedPeopleForSector(sectorObj: dict,
         total_time = time.time() - start_time
         logger.info(
             f"Sector search '{sector_name}' completed in {total_time:.2f}s. "
-            f"MongoDB: {len(users)}, After filtering: {len(people)}"
+            f"Data service: {len(users)}, After filtering: {len(people)}"
         )
         
         return people
@@ -1949,7 +1958,7 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
             
         logger.info(f"Running database query search with {len(db_queries)} queries, operator={operator}")
         
-        # Build MongoDB match conditions
+        # Build data service match conditions
         match_conditions = []
         for query in db_queries:
             field = query.get("field", "")
@@ -2053,12 +2062,12 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
             else:
                 regular_conditions.append(condition)
         
-        # Build MongoDB query
-        base_match = {"userId": ObjectId(userid)}
+        # Build data service query
+        base_match = _build_user_match(userid)
         
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [ObjectId(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering database query search to {len(shortlisted_ids)} shortlisted people")
         
@@ -2122,16 +2131,16 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
             {"$limit": max_results}
         ]
         
-        docs = list(mongoCollectionNodes.aggregate(pipeline))
+        docs = aggregate_nodes(pipeline)
         logger.info(f"Database query search matched {len(docs)} records")
         
         people = {}
         filtered_count = 0
         
         for doc in docs:
-            node_id = str(doc["_id"])
+            node_id = str(doc.get("_id") or doc.get("nodeId"))
             
-            # This check is now redundant if we pre-filtered in MongoDB, but keep for safety
+            # This check is now redundant if we pre-filtered upstream, but keep for safety
             if shortListedPeople and node_id not in shortListedPeople:
                 filtered_count += 1
                 logger.warning(f"Person {node_id} found in DB but not in shortlist (should not happen with optimization)")
@@ -2139,7 +2148,7 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
             
             result_dict = {
                 "nodeId": node_id,
-                "userId": str(doc["userId"]),
+                "userId": str(doc.get("userId")),
                 "name": doc.get("name", ""),
                 "currentLocation": doc.get("currentLocation", ""),
                 "dbQueryMatch": True  # Flag to indicate this came from DB query
