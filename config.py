@@ -23,8 +23,8 @@ def get_env_var(var_name: str, required: bool = True) -> Optional[str]:
 
 
 # External API configuration (used instead of direct MongoDB connections)
-DATA_API_BASE_URL = get_env_var("SEARCH_API_BASE_URL")
-DATA_API_KEY = get_env_var("SEARCH_API_KEY", required=False) or get_env_var("ADMIN_API_KEY", required=False)
+DATA_API_BASE_URL = get_env_var("BASE_URL")
+DATA_API_KEY = get_env_var("ADMIN_KEY", required=False)
 DATA_API_TIMEOUT = float(get_env_var("SEARCH_API_TIMEOUT", required=False) or 10)
 
 # Upstash Configuration (for vector search and Redis caching)
