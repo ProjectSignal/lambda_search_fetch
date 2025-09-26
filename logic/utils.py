@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pytz import utc
 import re
 import json
@@ -22,7 +22,7 @@ NETWORK_STAGE_WEIGHTS = {
 # --- Helpers ---
 def get_utc_now():
     """Returns the current UTC datetime with tzinfo."""
-    return datetime.utcnow().replace(tzinfo=utc)
+    return datetime.now(utc)
 
 def ensure_utc_datetime(dt):
     """Ensures that a datetime (or ISO‐formatted string) is in UTC."""
@@ -99,7 +99,7 @@ def validate_duration(duration):
 def calculate_next_reachout_date(frequency, custom_days=None, base_date=None):
     """Calculate the next reachout date based on frequency and optional custom days."""
     if base_date is None:
-        base_date = datetime.utcnow()
+        base_date = datetime.now(utc)
     elif isinstance(base_date, str):
         try:
             base_date = datetime.fromisoformat(base_date.replace('Z', '+00:00'))
@@ -118,7 +118,7 @@ def calculate_next_reachout_date(frequency, custom_days=None, base_date=None):
     return base_date + timedelta(days=14)
 
 def get_start_of_current_week_utc():
-    now = datetime.utcnow().replace(tzinfo=utc)
+    now = datetime.now(utc)
     start = now - timedelta(days=now.weekday())
     return start.replace(hour=0, minute=0, second=0, microsecond=0)
 

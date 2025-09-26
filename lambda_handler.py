@@ -27,7 +27,7 @@ class SearchStatus:
 
 def get_utc_now():
     """Returns current UTC datetime in ISO format"""
-    return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 # REMOVED: Unused helper functions for Step Functions architecture
 # def _extract_event_payload(event):
@@ -35,7 +35,7 @@ def get_utc_now():
 
 async def _run(event):
     """Main async execution logic for Search Lambda"""
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     search_id = None
     
     try:
@@ -115,10 +115,10 @@ async def _run(event):
         )
 
         # Calculate processing time
-        processing_time = (datetime.utcnow() - start_time).total_seconds()
+        processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
 
         # Update search document with results
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Store full candidate data for ranking in Reasoning Lambda
         candidates = result.get("candidates", [])  # Raw search candidates for ranking
@@ -145,14 +145,14 @@ async def _run(event):
                         **(search_doc.get("metrics", {}) or {}),
                         "searchMs": processing_time * 1000
                     },
-                    "updatedAt": now
+                    "updatedAt": now.isoformat()
                 },
                 append_events=[
                     {
                         "id": f"SEARCH:{search_id}",
                         "stage": "SEARCH",
                         "message": f"Search completed, {len(candidates)} candidates found",
-                        "timestamp": now
+                        "timestamp": now.isoformat()
                     }
                 ],
                 expected_statuses=[SearchStatus.HYDE_COMPLETE, SearchStatus.SEARCH_COMPLETE],
@@ -203,7 +203,7 @@ async def _run(event):
         # Update search document with error state if we have searchId
         if search_id:
             try:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 update_search_document(
                     search_id,
                     set_fields={
@@ -212,15 +212,15 @@ async def _run(event):
                             "stage": "SEARCH",
                             "message": str(e),
                             "stackTrace": traceback.format_exc(),
-                            "occurredAt": now
+                            "occurredAt": now.isoformat()
                         },
-                        "updatedAt": now
+                        "updatedAt": now.isoformat()
                     },
                     append_events=[
                         {
                             "stage": "SEARCH",
                             "message": f"Error: {str(e)}",
-                            "timestamp": now
+                            "timestamp": now.isoformat()
                         }
                     ],
                 )

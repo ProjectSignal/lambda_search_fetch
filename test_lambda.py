@@ -8,7 +8,7 @@ import sys
 import os
 import uuid
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +25,7 @@ def create_test_search_document_with_hyde():
         user_id = "6797bf304791caa516f6da9e"  # Valid ObjectId for testing
         query = "Find machine learning experts based out of blr and graduated from iit"
         
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         test_doc = {
             "_id": search_id,
             "userId": user_id,
@@ -39,19 +39,19 @@ def create_test_search_document_with_hyde():
                 "fallback": False
             },
             "status": SearchStatus.HYDE_COMPLETE,
-            "createdAt": now,
-            "updatedAt": now,
+            "createdAt": now.isoformat(),
+            "updatedAt": now.isoformat(),
             "events": [
                 {
                     "stage": "INIT",
                     "message": "Search initiated (test document)",
-                    "timestamp": now
+                    "timestamp": now.isoformat()
                 },
                 {
                     "id": f"HYDE:{search_id}",
                     "stage": "HYDE",
                     "message": "HyDE analysis completed",
-                    "timestamp": now
+                    "timestamp": now.isoformat()
                 }
             ],
             "metrics": {

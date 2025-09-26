@@ -32,7 +32,7 @@ class SearchProcessor:
         Returns:
             Dictionary containing candidate results and metadata
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             logger.info(f"Starting Search processing for user {user_id}")
@@ -52,7 +52,7 @@ class SearchProcessor:
                 candidates = list(people_data.get('people', {}).values())
 
             # Calculate processing time
-            processing_time = (datetime.utcnow() - start_time).total_seconds()
+            processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
 
             # Prepare result
             result = {
@@ -69,7 +69,7 @@ class SearchProcessor:
             return result
 
         except Exception as e:
-            processing_time = (datetime.utcnow() - start_time).total_seconds()
+            processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
             logger.error(f"Error in FetchAndRank processing: {str(e)}")
 
             # Store error result
