@@ -61,6 +61,11 @@ def _build_user_match(userid: str) -> Dict[str, Any]:
         return {}
     return {"userId": {"$oid": str(userid)}}
 
+
+def _convert_ids_to_extended_json(ids: List[str]) -> List[Dict[str, str]]:
+    """Convert list of string IDs to Extended JSON format for MongoDB queries."""
+    return [{"$oid": str(id_val)} for id_val in ids]
+
 # ------------------------------------------------------------------------------
 
 def process_mutuals(mutual_ids):
@@ -677,7 +682,7 @@ def getShortListedPeopleForLocationRegex(locationObj: dict,
 
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = _convert_ids_to_extended_json(list(shortListedPeople.keys()))
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering location search to {len(shortlisted_ids)} shortlisted people")
 
@@ -997,7 +1002,7 @@ def getShortListedPeopleForTitleKeywords(titleKeywords: List[str],
         match_base = _build_user_match(userid)
 
         if shortListedPeople:
-            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = _convert_ids_to_extended_json(list(shortListedPeople.keys()))
             match_base["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Optimizing search to only look within {len(shortlisted_ids)} shortlisted people")
         
@@ -1204,7 +1209,7 @@ def getShortListedPeopleForSkillRegex(skillObj: dict,
         
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = _convert_ids_to_extended_json(list(shortListedPeople.keys()))
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering skill regex search to {len(shortlisted_ids)} shortlisted people")
         
@@ -1470,7 +1475,7 @@ def getShortListedPeopleForOrganisation(organisationObj: dict,  # ← Changed pa
         
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = _convert_ids_to_extended_json(list(shortListedPeople.keys()))
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering organization search to {len(shortlisted_ids)} shortlisted people")
 
@@ -1741,7 +1746,7 @@ def getShortListedPeopleForSector(sectorObj: dict,
         
         # OPTIMIZATION: Pre-filter if shortListedPeople provided
         if shortListedPeople:
-            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = _convert_ids_to_extended_json(list(shortListedPeople.keys()))
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering to {len(shortlisted_ids)} shortlisted people")
         
@@ -2067,7 +2072,7 @@ def getShortListedPeopleForDatabaseQuery(db_queries: list,
         
         # OPTIMIZATION: Pre-filter at database level if shortListedPeople is provided
         if shortListedPeople:
-            shortlisted_ids = [str(pid) for pid in shortListedPeople.keys()]
+            shortlisted_ids = _convert_ids_to_extended_json(list(shortListedPeople.keys()))
             base_match["_id"] = {"$in": shortlisted_ids}
             logger.info(f"Pre-filtering database query search to {len(shortlisted_ids)} shortlisted people")
         

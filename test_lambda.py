@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lambda_handler import lambda_handler, SearchStatus
 
+DEFAULT_USER_ID = "6797bf304791caa516f6da9e"
+
 def create_test_search_document_with_hyde():
     """Create a test search document in HYDE_COMPLETE status with HyDE analysis"""
     
@@ -22,7 +24,7 @@ def create_test_search_document_with_hyde():
         from api_client import create_search_document
 
         search_id = str(uuid.uuid4())
-        user_id = "6797bf304791caa516f6da9e"  # Valid ObjectId for testing
+        user_id = DEFAULT_USER_ID  # Valid ObjectId for testing
         query = "Find machine learning experts based out of blr and graduated from iit"
         
         now = datetime.now(timezone.utc)
@@ -156,13 +158,13 @@ def create_test_search_document_with_hyde():
         traceback.print_exc()
         return None, None, None, None
 
-def find_existing_search_document(search_id):
+def find_existing_search_document(search_id, user_id):
     """Find an existing search document by searchId"""
 
     try:
         from api_client import get_search_document
 
-        doc = get_search_document(search_id)
+        doc = get_search_document(search_id, user_id=user_id)
         if not doc:
             print(f"❌ No document found with searchId: {search_id}")
             return None, None, None, None
@@ -197,7 +199,7 @@ def create_step_functions_event(search_id, user_id, query, flags):
         "flags": flags
     }
 
-def test_fetch_lambda(existing_search_id=None):
+def test_fetch_lambda(existing_search_id=None, provided_user_id=None):
     """Test the Fetch Lambda with Step Functions event format"""
 
     print("Testing Fetch Lambda...")
@@ -206,14 +208,17 @@ def test_fetch_lambda(existing_search_id=None):
     # Step 1: Get test search document (existing or create new)
     if existing_search_id:
         print(f"1. Using existing search document: {existing_search_id}")
-        search_id, user_id, query, flags = find_existing_search_document(existing_search_id)
+        if not provided_user_id:
+            print("❌ userId is required when reusing an existing search document")
+            return None, None, None
+        search_id, user_id, query, flags = find_existing_search_document(existing_search_id, provided_user_id)
     else:
         print("1. Creating test search document with HyDE analysis...")
         search_id, user_id, query, flags = create_test_search_document_with_hyde()
 
     if not search_id:
         print("❌ Cannot proceed without test search document")
-        return None
+        return None, None, None
 
     # Step 2: Create Step Functions event
     test_event = create_step_functions_event(search_id, user_id, query, flags)
@@ -245,23 +250,23 @@ def test_fetch_lambda(existing_search_id=None):
         # Step 4: Validate search document was updated
         if result['statusCode'] == 200:
             print("\n4. Validating search document update...")
-            validate_search_document_update(search_id)
+            validate_search_document_update(search_id, user_id)
 
-        return result
+        return result, search_id, user_id
 
     except Exception as e:
         print(f"\n❌ Error running lambda: {str(e)}")
         import traceback
         traceback.print_exc()
-        return None
+        return None, None, None
 
-def validate_search_document_update(search_id):
+def validate_search_document_update(search_id, user_id):
     """Validate that the search document was properly updated with search results"""
     
     try:
         from api_client import get_search_document
 
-        doc = get_search_document(search_id)
+        doc = get_search_document(search_id, user_id=user_id)
         if not doc:
             print("❌ Search document not found")
             return False
@@ -306,12 +311,12 @@ def validate_search_document_update(search_id):
         print(f"   ❌ Error validating document: {str(e)}")
         return False
 
-def cleanup_test_document(search_id):
+def cleanup_test_document(search_id, user_id):
     """Clean up test document after test"""
     try:
         from api_client import delete_search_document
 
-        delete_search_document(search_id)
+        delete_search_document(search_id, user_id=user_id)
         print(f"🧹 Cleaned up test document: {search_id}")
     except Exception as e:
         print(f"⚠️  Could not clean up test document: {str(e)}")
@@ -321,14 +326,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test Fetch Lambda function')
     parser.add_argument('--search-id', type=str,
                        help='Use existing searchId from HyDE test (for pipeline testing)')
+    parser.add_argument('--user-id', type=str,
+                       help='UserId associated with the search document (required when using --search-id)')
     args = parser.parse_args()
 
     print("🚀 Starting Fetch Lambda Test")
     if args.search_id:
         print(f"📌 Using existing searchId: {args.search_id}")
+        if not args.user_id:
+            print("❌ --user-id is required when supplying --search-id")
+            sys.exit(1)
 
     # Run the test
-    result = test_fetch_lambda(existing_search_id=args.search_id)
+    result, search_id, user_id = test_fetch_lambda(
+        existing_search_id=args.search_id,
+        provided_user_id=args.user_id,
+    )
 
     print("\n" + "=" * 50)
 
@@ -342,9 +355,9 @@ if __name__ == "__main__":
                     body = json.loads(result['body'])
                 else:
                     body = result['body']
-                search_id = body.get('searchId')
-                if search_id:
-                    cleanup_test_document(search_id)
+                search_id = body.get('searchId') or search_id
+                if search_id and user_id:
+                    cleanup_test_document(search_id, user_id)
             except:
                 pass
         else:

@@ -29,6 +29,15 @@ def get_utc_now():
     """Returns current UTC datetime in ISO format"""
     return datetime.now(timezone.utc).isoformat()
 
+
+def _normalize_user_id(raw_user_id):
+    if isinstance(raw_user_id, dict) and "$oid" in raw_user_id:
+        raw_user_id = raw_user_id["$oid"]
+    if raw_user_id is None:
+        return None
+    user_id_str = str(raw_user_id).strip()
+    return user_id_str or None
+
 # REMOVED: Unused helper functions for Step Functions architecture
 # def _extract_event_payload(event):
 # def _get_event_value(event, key):
@@ -41,7 +50,7 @@ async def _run(event):
     try:
         # Extract required parameters from Step Functions event
         search_id = event.get('searchId')
-        user_id = event.get('userId')
+        user_id = _normalize_user_id(event.get('userId') or event.get('user_id'))
         query = event.get('query')
         flags = event.get('flags', {})
 
@@ -59,7 +68,7 @@ async def _run(event):
         logger.info(f"Processing Search for searchId: {search_id}, user: {user_id}, query: {query}")
 
         # Get search document and verify HyDE analysis is complete
-        search_doc = get_search_document(search_id)
+        search_doc = get_search_document(search_id, user_id=user_id)
         if not search_doc:
             error_msg = f"Search document not found for searchId: {search_id}"
             logger.error(error_msg)
@@ -130,6 +139,7 @@ async def _run(event):
         try:
             update_search_document(
                 search_id,
+                user_id=user_id,
                 set_fields={
                     "results": {
                         "summary": {
@@ -158,7 +168,7 @@ async def _run(event):
                 expected_statuses=[SearchStatus.HYDE_COMPLETE, SearchStatus.SEARCH_COMPLETE],
             )
         except SearchServiceError as update_error:
-            existing_doc = get_search_document(search_id)
+            existing_doc = get_search_document(search_id, user_id=user_id)
             if existing_doc and existing_doc.get("status") == SearchStatus.SEARCH_COMPLETE:
                 logger.info(f"Search document {search_id} already processed (idempotent retry)")
                 existing_candidates = existing_doc.get("results", {}).get("candidates", [])
@@ -201,11 +211,12 @@ async def _run(event):
         logger.error(f"Error in FetchAndRank Lambda: {str(e)}", exc_info=True)
         
         # Update search document with error state if we have searchId
-        if search_id:
+        if search_id and user_id:
             try:
                 now = datetime.now(timezone.utc)
                 update_search_document(
                     search_id,
+                    user_id=user_id,
                     set_fields={
                         "status": SearchStatus.ERROR,
                         "error": {
