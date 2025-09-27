@@ -19,7 +19,6 @@ from asyncio import Semaphore
 import requests
 
 from logic.utils import format_datetime
-from bson.objectid import ObjectId
 
 from logging_config import setup_logger
 logger = setup_logger(__name__)
@@ -42,17 +41,11 @@ search_limits = SearchLimits()
 # ------------------------------------------------------------------------------
 def convert_objectids_to_strings(obj):
     """
-    Recursively convert ObjectIds to strings in nested data structures.
-    Handles dictionaries, lists, and ObjectId objects.
+    Pass-through function for API-based approach.
+    Data is already in serializable format from backend API.
     """
-    if isinstance(obj, ObjectId):
-        return str(obj)
-    elif isinstance(obj, dict):
-        return {key: convert_objectids_to_strings(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_objectids_to_strings(item) for item in obj]
-    else:
-        return obj
+    # With API-based approach, data is already serializable
+    return obj
 
 
 def _build_user_match(userid: str) -> Dict[str, Any]:
@@ -82,8 +75,6 @@ def process_mutuals(mutual_ids):
         for mid in mutual_ids:
             if isinstance(mid, dict) and '$oid' in mid:
                 node_ids.append(str(mid['$oid']))
-            elif isinstance(mid, ObjectId):
-                node_ids.append(str(mid))
             elif mid:
                 node_ids.append(str(mid))
 
@@ -94,8 +85,6 @@ def process_mutuals(mutual_ids):
         results = []
         for node_id in node_ids:
             doc = mutual_map.get(node_id)
-            if not doc and node_id.startswith('ObjectId('):
-                doc = mutual_map.get(node_id.strip('ObjectId(').strip(')'))
             if not doc:
                 continue
             normalized_id = str(doc.get("_id") or doc.get("nodeId") or node_id)
@@ -3015,7 +3004,7 @@ if __name__ == "__main__":
             # Convert any non-serializable types to their string representation
             serializable_result = {}
             for key, value in result.items():
-                if isinstance(value, (datetime, ObjectId)):
+                if isinstance(value, datetime):
                     serializable_result[key] = str(value)
                 else:
                     serializable_result[key] = value
